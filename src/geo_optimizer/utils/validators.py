@@ -54,6 +54,59 @@ _BLOCKED_HOSTNAMES = {
 }
 
 
+def _env_flag_enabled(name: str) -> bool:
+    """Return True if an environment flag is enabled."""
+    value = os.environ.get(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _parse_csv_env(name: str) -> list[str]:
+    """Parse a comma-separated environment variable into normalized tokens."""
+    raw = os.environ.get(name, "")
+    return [token.strip().lower().strip(".") for token in raw.split(",") if token.strip()]
+
+
+def _hostname_matches_allowed_domains(hostname: str, allowed_domains: list[str]) -> bool:
+    """Return True if hostname matches an allowed domain (exact or subdomain)."""
+    host = hostname.lower().strip(".")
+    for domain in allowed_domains:
+        if host == domain or host.endswith("." + domain):
+            return True
+    return False
+
+
+def _is_private_ip_explicitly_allowed(hostname: str, ip_str: str) -> bool:
+    """Allow private/reserved IP only with explicit env-based allowlists."""
+    if not _env_flag_enabled("GEO_ALLOW_PRIVATE_NET"):
+        return False
+
+    allowed_domains = _parse_csv_env("GEO_PRIVATE_ALLOW_DOMAINS")
+    if not allowed_domains:
+        return False
+    if not _hostname_matches_allowed_domains(hostname, allowed_domains):
+        return False
+
+    # Optional CIDR restriction: if omitted, any private IP for allowed domains is accepted.
+    allowed_cidrs = _parse_csv_env("GEO_PRIVATE_ALLOW_CIDRS")
+    if not allowed_cidrs:
+        return True
+
+    try:
+        ip_obj = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+
+    for cidr in allowed_cidrs:
+        try:
+            network = ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            logger.warning("Invalid CIDR in GEO_PRIVATE_ALLOW_CIDRS: %s", cidr)
+            continue
+        if ip_obj in network:
+            return True
+    return False
+
+
 def _is_ip_blocked(ip_obj) -> bool:
     """Check whether an IP is private/reserved using Python's standard APIs.
 
@@ -149,6 +202,10 @@ def resolve_and_validate_url(url: str) -> tuple[bool, str | None, list[str]]:
         ip_str = str(sockaddr[0])
         bloccato, msg = _check_ip_blocked(ip_str)
         if bloccato:
+            if _is_private_ip_explicitly_allowed(hostname, ip_str):
+                logger.debug("Private IP %s allowed for hostname %s via env allowlist", ip_str, hostname)
+                ip_validi.append(ip_str)
+                continue
             # Fix M-3: do not include resolved IP in user-facing error message
             logger.debug("SSRF blocked: %s resolved to %s", hostname, ip_str)
             return (

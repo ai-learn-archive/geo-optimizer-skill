@@ -113,6 +113,60 @@ class TestResolveAndValidateUrl:
             assert ok is True
             assert err is None
 
+    def test_private_ip_allowed_with_env_domain_and_cidr(self):
+        """Allow private IP only when env flag + allowed domain + allowed CIDR are configured."""
+        with patch.dict(
+            "os.environ",
+            {
+                "GEO_ALLOW_PRIVATE_NET": "1",
+                "GEO_PRIVATE_ALLOW_DOMAINS": "biomart.net",
+                "GEO_PRIVATE_ALLOW_CIDRS": "192.168.200.0/24",
+            },
+            clear=False,
+        ):
+            with patch("geo_optimizer.utils.validators.socket.getaddrinfo") as mock_dns:
+                mock_dns.return_value = [(2, 1, 6, "", ("192.168.200.44", 0))]
+                ok, err, ips = resolve_and_validate_url("https://www.biomart.net")
+                assert ok is True
+                assert err is None
+                assert ips == ["192.168.200.44"]
+
+    def test_private_ip_still_blocked_when_domain_not_allowed(self):
+        """Even with private-net flag, host outside allowlist remains blocked."""
+        with patch.dict(
+            "os.environ",
+            {
+                "GEO_ALLOW_PRIVATE_NET": "1",
+                "GEO_PRIVATE_ALLOW_DOMAINS": "biomart.net",
+                "GEO_PRIVATE_ALLOW_CIDRS": "192.168.200.0/24",
+            },
+            clear=False,
+        ):
+            with patch("geo_optimizer.utils.validators.socket.getaddrinfo") as mock_dns:
+                mock_dns.return_value = [(2, 1, 6, "", ("192.168.200.44", 0))]
+                ok, err, ips = resolve_and_validate_url("https://www.other.net")
+                assert ok is False
+                assert "non-public" in err.lower()
+                assert ips == []
+
+    def test_private_ip_blocked_when_cidr_not_allowed(self):
+        """If CIDR allowlist is configured and IP is outside, request is blocked."""
+        with patch.dict(
+            "os.environ",
+            {
+                "GEO_ALLOW_PRIVATE_NET": "1",
+                "GEO_PRIVATE_ALLOW_DOMAINS": "biomart.net",
+                "GEO_PRIVATE_ALLOW_CIDRS": "192.168.201.0/24",
+            },
+            clear=False,
+        ):
+            with patch("geo_optimizer.utils.validators.socket.getaddrinfo") as mock_dns:
+                mock_dns.return_value = [(2, 1, 6, "", ("192.168.200.44", 0))]
+                ok, err, ips = resolve_and_validate_url("https://www.biomart.net")
+                assert ok is False
+                assert "non-public" in err.lower()
+                assert ips == []
+
 
 # ============================================================================
 # #94/#73 — SSRF via HTTP Redirect
